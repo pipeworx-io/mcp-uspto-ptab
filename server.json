@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/uspto-ptab",
   "title": "Uspto Ptab",
   "description": "USPTO PTAB Trials MCP — wraps the USPTO Open Data Portal (ODP) PTAB Trials API",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://pipeworx.io/packs/uspto-ptab",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-uspto-ptab",

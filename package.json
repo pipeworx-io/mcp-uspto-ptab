@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-uspto-ptab",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "USPTO PTAB Trials MCP — wraps the USPTO Open Data Portal (ODP) PTAB Trials API",
   "type": "module",
   "main": "src/index.ts",
@@ -24,5 +24,9 @@
   "devDependencies": {
     "typescript": "^5.9.3",
     "@cloudflare/workers-types": "^4.20260405.1"
+  },
+  "pipeworx": {
+    "sourceHash": "v1-10cc3ca4ff3f4889a8f9ad6c4e0fba41df4c40a18ae3c51ff6eccb24622da5d5",
+    "sourceCommit": "b0fb3c31386cf0256dcf1e2f1b3440435a87ec35"
   }
 }
