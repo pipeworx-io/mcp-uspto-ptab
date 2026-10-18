@@ -1,8 +1,8 @@
 # mcp-uspto-ptab
 
-USPTO PTAB Trials MCP — wraps the USPTO Open Data Portal (ODP) PTAB Trials API
+USPTO PTAB MCP — wraps the USPTO Open Data Portal (ODP) PTAB APIs
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1837+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
@@ -15,6 +15,9 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 | `ptab_patent_risk_profile` | Summarize PTAB proceedings and recorded decision outcomes for one challenged patent. Reports status/outcome counts and recent matters for review routing; it is not a validity opinion, litigation forecast, freedom-to-operate analysis, or claim-level legal conclusion. |
 | `ptab_party_exposure` | Summarize PTAB proceeding exposure for a petitioner or patent owner, including roles, challenged patents, statuses, trial types, and recorded outcomes. Party matching follows USPTO indexed names and may combine similarly named entities; verify identity before relying on totals. |
 | `ptab_recent_decisions` | Return and summarize recently issued public PTAB trial decisions, optionally filtered by trial type, patent, or party. Outcome labels describe the document-level USPTO record and require review in proceeding context; they are not claim-by-claim legal conclusions. |
+| `ptab_search_appeals` | Search USPTO ex parte Appeals decisions — an applicant's appeal of a patent examiner's rejection to the Patent Trial and Appeal Board. This is a SEPARATE docket from AIA trials (IPR/PGR/CBM/derivation): an appeal number looks like "2024-001234", not "IPR2024-00001". Returns an outcome-count summary first (affirmed / reversed / affirmed-in-part / other), then the matching decision records, each with the applicant/real-party-in-interest, application and patent number, counsel, art unit, appeal filing date, decision type/date, and the decision document link. Filter by `appeal_number`, `application_number` (the rejected application under appeal), free-text `query`, and/or a `decided_after`/`decided_before` date range. Powered by the USPTO Open Data Portal (data.uspto.gov). |
+| `ptab_appeal` | Get one USPTO ex parte Appeal decision by its appeal number (e.g. "2024-001234") — the Board's decision on an applicant's appeal of an examiner rejection. Returns the decision type, issue date, outcome (affirmed / reversed / affirmed-in-part), issues and rules at play, and the decision document title + download link. Powered by the USPTO Open Data Portal (data.uspto.gov). |
+| `ptab_search_interferences` | Search USPTO patent Interference decisions — pre-AIA priority contests between competing applicants/patentees over who invented first. A SEPARATE docket from AIA trials and ex parte Appeals. Filter by `patent_number` (a patent or application involved in the contest), `party` (junior- or senior-party name, or either party's real party in interest), and/or free-text `query`. Returns the interference number, style ("A v. B"), declaration date, the junior and senior party (each with name, real party in interest, inventor, counsel, application/patent number, grant date), any additional parties, decision type/date and outcome, and the decision document link. Powered by the USPTO Open Data Portal (data.uspto.gov). |
 
 ## Quick Start
 
@@ -60,7 +63,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1684+ data sources. The
+Both URLs reach the same gateway and the same 1837+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

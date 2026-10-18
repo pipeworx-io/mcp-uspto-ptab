@@ -671,25 +671,55 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 /**
- * USPTO PTAB Trials MCP — wraps the USPTO Open Data Portal (ODP) PTAB Trials API
+ * USPTO PTAB MCP — wraps the USPTO Open Data Portal (ODP) PTAB APIs
  *
- * Patent litigation before the Patent Trial and Appeal Board: inter partes
- * review (IPR), post-grant review (PGR), covered-business-method (CBM),
- * derivation, and appeals — proceedings, decisions, and filed documents.
+ * Patent litigation and prosecution-appeal dockets before the Patent Trial and
+ * Appeal Board, across THREE separate ODP products on the same host:
+ *  - AIA trials: inter partes review (IPR), post-grant review (PGR),
+ *    covered-business-method (CBM), derivation — proceedings, decisions, filed
+ *    documents.
+ *  - Ex parte Appeals: an applicant's appeal of an examiner's rejection to the
+ *    Board (case numbers like "2024-001234", distinct from an AIA trial number).
+ *  - Interferences: pre-AIA priority contests between competing applicants/
+ *    patentees (case numbers like "106012").
+ * These are three separate ODP products, not three views of one dataset — an
+ * ex parte appeal number and an AIA trial number are different identifier
+ * spaces, and only the trials product exposes proceeding/document endpoints;
+ * appeals and interferences expose decisions only.
  *
  * Host + auth are IDENTICAL to the `patents` pack (USPTO ODP). Same free ODP
  * API key (X-Api-Key header, platform-key pattern via `_apiKey`).
  *
  * Search endpoints accept a Lucene-style `q` string (field:value with AND/OR/
  * NOT, wildcards, and [from TO to] ranges) plus a `pagination` object, sent as
- * a JSON POST body. Responses wrap results in a `patentTrial*DataBag` array.
+ * a JSON POST body. Responses wrap results in a `patentTrial*DataBag` /
+ * `patentAppealDataBag` / `patentInterferenceDataBag` array.
  *
  * Tools:
- * - ptab_search_proceedings: IPR/PGR/CBM/derivation proceedings
- * - ptab_search_decisions:   PTAB decision documents (institution / final written)
- * - ptab_search_documents:   filings/briefs/declarations within a proceeding
+ * - ptab_search_proceedings:   IPR/PGR/CBM/derivation proceedings
+ * - ptab_search_decisions:     PTAB trial decision documents (institution / final written)
+ * - ptab_search_documents:     filings/briefs/declarations within a trial proceeding
+ * - ptab_proceeding_timeline:  chronological event list for one AIA trial
+ * - ptab_patent_risk_profile:  AIA-trial summary for one challenged patent
+ * - ptab_party_exposure:       AIA-trial summary for one petitioner/owner
+ * - ptab_recent_decisions:     recently issued AIA trial decisions
+ * - ptab_search_appeals:       ex parte Appeals decisions (outcome counts first, records last)
+ * - ptab_appeal:               one ex parte Appeal decision + outcome + document link
+ * - ptab_search_interferences: pre-AIA Interference decisions
  *
- * Docs: https://data.uspto.gov/apis/ptab-trials/
+ * Docs: https://data.uspto.gov/apis/ptab-trials/, https://data.uspto.gov/apis/ptab-appeals/,
+ * https://data.uspto.gov/apis/ptab-interferences/
+ *
+ * NOTE on the Appeals/Interferences field names below: the ODP docs for these
+ * two products are served by a client-side-routed SPA (no static page text to
+ * read without a browser), so the bag/field names here come from USPTO's own
+ * published API-change mapping doc + third-party client libraries, not a live
+ * authenticated call (no key was available at build time — see the house
+ * rule against guessing without evidence). Where a field name is uncertain,
+ * the query builder OR's multiple plausible field names together, and the
+ * record parser is defensive (see `unwrapLoud`): a non-empty result set that
+ * doesn't match any known bag name fails LOUD with the real top-level keys,
+ * rather than silently reporting zero records.
  */
 
 
@@ -703,6 +733,8 @@ async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response>
 
 
 const BASE_URL = 'https://api.uspto.gov/api/v1/patent/trials';
+const APPEALS_BASE_URL = 'https://api.uspto.gov/api/v1/patent/appeals';
+const INTERFERENCES_BASE_URL = 'https://api.uspto.gov/api/v1/patent/interferences';
 
 // ── Raw API types (subset — API returns more; we pick defensively) ────
 
@@ -795,11 +827,12 @@ async function ptabSearch(
   q: string,
   offset: number,
   limit: number,
+  baseUrl: string = BASE_URL,
 ): Promise<TrialSearchResponse> {
   const body = { q, pagination: { offset, limit } };
   let res: Response;
   try {
-    res = await pwFetch(`${BASE_URL}${path}`, {
+    res = await pwFetch(`${baseUrl}${path}`, {
       method: 'POST',
       headers: {
         'X-Api-Key': apiKey,
@@ -861,6 +894,78 @@ function unwrap(data: TrialSearchResponse): TrialRecord[] {
     data.patentTrialDecisionDataBag ??
     data.patentTrialDocumentDataBag ??
     []
+  );
+}
+
+// ── Appeals / Interferences (loose, defensively-parsed shape) ──────────
+//
+// These two ODP products are not mirrored by our own pack's existing live
+// traffic the way AIA trials are, and their SPA docs pages render no static
+// text (see the house rule against guessing without evidence — the bag/field
+// names below come from USPTO's own published API-change mapping doc, not a
+// live call). `GenericRecord` deliberately keeps an index signature instead of
+// a narrow interface so a field-name miss doesn't throw a TypeScript-shaped
+// wall at runtime; `unwrapLoud` is what turns a genuine schema mismatch into a
+// loud, diagnosable error instead of a silent empty result.
+interface GenericRecord extends Record<string, unknown> {
+  decisionData?: DecisionData;
+  documentData?: DocumentData;
+}
+
+interface GenericSearchResponse extends Record<string, unknown> {
+  count?: number;
+  requestIdentifier?: string;
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+}
+
+// Read the first matching key across a record and (optionally) one or more
+// nested sub-objects, trying several plausible field-name spellings. Live
+// post-deploy probing (fleet #3306 follow-up, 2026-10-18) confirmed some of
+// these guesses right and some wrong — see the field-name confidence note
+// below — so this checks TOP LEVEL first, then each nested candidate in turn,
+// which costs nothing when a guess is wrong and catches it when the real
+// schema nests a field we assumed was flat (or vice versa).
+function pick(r: GenericRecord, keys: string[], nested?: string | string[]): string | undefined {
+  for (const k of keys) {
+    const v = str(r[k]);
+    if (v) return v;
+  }
+  const nestedKeys = nested ? (Array.isArray(nested) ? nested : [nested]) : [];
+  for (const nestKey of nestedKeys) {
+    const sub = r[nestKey];
+    if (sub && typeof sub === 'object') {
+      for (const k of keys) {
+        const v = str((sub as Record<string, unknown>)[k]);
+        if (v) return v;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Unwrap a search response whose top-level bag key is uncertain. Tries every
+// candidate key; if the response plainly reports zero matches (count === 0,
+// or absent with no candidate present), that is a legitimate empty result. If
+// it reports a positive count but none of the candidate keys hold a non-empty
+// array, that is a schema mismatch — fail LOUD naming the real top-level keys
+// so it can be diagnosed from the raw response, rather than silently
+// returning `[]` and reading as "no records" (house rule: a zero-parse must
+// be loud, never indistinguishable from a true empty search).
+function unwrapLoud(data: GenericSearchResponse, candidateBags: string[], toolLabel: string): GenericRecord[] {
+  for (const bag of candidateBags) {
+    const v = data[bag];
+    if (Array.isArray(v)) return v as GenericRecord[];
+  }
+  const count = typeof data.count === 'number' ? data.count : undefined;
+  if (count === 0 || count === undefined) return [];
+  const keys = Object.keys(data).join(', ') || '(no keys)';
+  throw new Error(
+    `USPTO PTAB ${toolLabel}: response reported count=${count} but none of the expected bag keys ` +
+      `(${candidateBags.join(', ')}) were present as arrays. Top-level keys seen: ${keys}. ` +
+      `This is a schema-mismatch, not a true empty result — the ODP field name differs from what this pack assumes.`,
   );
 }
 
@@ -994,13 +1099,129 @@ function tally(values: Array<string | null | undefined>) {
   return [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
-function resultCoverage(data: TrialSearchResponse, records: TrialRecord[]) {
+function resultCoverage(data: { count?: number }, records: unknown[]) {
   const total = data.count ?? records.length;
   return { matching_records: total, analyzed_records: records.length, truncated: total > records.length };
 }
 
 function isoDate(date: Date) {
   return date.toISOString().slice(0, 10);
+}
+
+// ── Appeals / Interferences formatters ──────────────────────────────
+//
+// FIELD NAMES CONFIRMED LIVE (fleet #3306, two follow-up passes with
+// `include_raw` reading real ODP payloads, 2026-10-18 — not guessed):
+//
+//   APPEALS record shape: appealNumber, appealDocumentCategory (top-level);
+//   appealMetaData.{appealFilingDate, fileDownloadURI}; appellantData.
+//   {applicationNumberText, counselName, groupArtUnitNumber, inventorName,
+//   realPartyInInterestName, patentNumber (an EMPTY STRING when none, not
+//   absent — treat "" as null), patentOwnerName, publicationNumber,
+//   publicationDate, technologyCenterNumber}; documentData.{documentIdentifier,
+//   documentName, documentOCRText, decisionIssueDate, decisionTypeCategory,
+//   fileDownloadURI, documentFilingDate}. decisionData.{decisionIssueDate,
+//   appealOutcomeCategory} was ALSO confirmed live in the first follow-up
+//   pass (outcome "Affirmed" came through correctly) — kept as the primary
+//   source for those two fields since it already works; documentData is
+//   read as a fallback in case a given record only populates one of the two.
+//
+//   INTERFERENCES record shape (full raw sample captured via include_raw):
+//   interferenceNumber, lastModifiedDateTime (top-level); interferenceMetaData.
+//   {declarationDate, interferenceStyleName, fileDownloadURI,
+//   interferenceLastModifiedDate}; seniorPartyData/juniorPartyData.
+//   {applicationNumberText, patentOwnerName, realPartyInInterestName,
+//   inventorName, counselName, publicationNumber, publicationDate,
+//   groupArtUnitNumber, technologyCenterNumber} (juniorPartyData additionally
+//   carries patentNumber + grantDate — a "senior party" in a priority contest
+//   may be the still-pending applicant with no patent number yet);
+//   additionalPartyDataBag[] of {applicationNumberText, inventorName,
+//   patentNumber, additionalPartyName}; documentData.{documentTitleText,
+//   documentName, documentIdentifier, decisionIssueDate, decisionTypeCategory,
+//   interferenceOutcomeCategory (NOT appealOutcomeCategory — a different key
+//   from the appeals/trials products), statuteAndRuleBag[], documentFilingDate,
+//   fileDownloadURI, documentOCRText}. There is NO separate `decisionData`
+//   object on an interference record — all decision fields live directly
+//   under documentData.
+//
+// A second-source community Python client (pip `uspto-odp`) was tried in an
+// earlier pass and modeled both products as flat records with no nesting at
+// all — that turned out to be wrong (the real shape nests everything under
+// per-party/per-document sub-objects as above); it is not referenced further.
+// `include_raw` stays on all three tools so any record shape that still
+// slips through can be read directly rather than re-guessed.
+
+function formatAppeal(r: GenericRecord) {
+  const d = r.decisionData ?? {};
+  const doc = r.documentData ?? {};
+  const docRaw = (r.documentData as unknown as Record<string, unknown>) ?? {};
+  const appellant = (r.appellantData as Record<string, unknown>) ?? {};
+  const meta = (r.appealMetaData as Record<string, unknown>) ?? {};
+  return {
+    appeal_number: pick(r, ['appealNumber', 'appealDocketNumber']) ?? null,
+    application_number: str(appellant.applicationNumberText) ?? null,
+    patent_number: str(appellant.patentNumber) ?? null, // "" on an un-patented application — str() already turns "" into undefined
+    applicant: str(appellant.realPartyInInterestName) ?? str(appellant.patentOwnerName) ?? str(appellant.inventorName) ?? null,
+    counsel: str(appellant.counselName) ?? null,
+    art_unit: str(appellant.groupArtUnitNumber) ?? null,
+    technology_center: str(appellant.technologyCenterNumber) ?? null,
+    appeal_filing_date: str(meta.appealFilingDate) ?? null,
+    decision_type: d.decisionTypeCategory ?? str(docRaw.decisionTypeCategory) ?? null,
+    decision_issue_date: d.decisionIssueDate ?? str(docRaw.decisionIssueDate) ?? null,
+    outcome: d.appealOutcomeCategory ?? null,
+    issue_types: d.issueTypeBag ?? null,
+    statutes_and_rules: d.statuteAndRuleBag ?? null,
+    document_title: doc.documentTitleText ?? doc.documentName ?? null,
+    document_identifier: doc.documentIdentifier ?? null,
+    document_uri: doc.fileDownloadURI ?? null,
+    case_files_uri: str(meta.fileDownloadURI) ?? null,
+    last_modified: pick(r, ['lastModifiedDateTime']) ?? null,
+  };
+}
+
+function formatInterferenceParty(p: Record<string, unknown>) {
+  return {
+    name: str(p.patentOwnerName) ?? null,
+    real_party_in_interest: str(p.realPartyInInterestName) ?? null,
+    inventor: str(p.inventorName) ?? null,
+    counsel: str(p.counselName) ?? null,
+    application_number: str(p.applicationNumberText) ?? null,
+    patent_number: str(p.patentNumber) ?? null,
+    grant_date: str(p.grantDate) ?? null,
+    publication_number: str(p.publicationNumber) ?? null,
+    publication_date: str(p.publicationDate) ?? null,
+  };
+}
+
+function formatInterference(r: GenericRecord) {
+  const docRaw = (r.documentData as unknown as Record<string, unknown>) ?? {};
+  const doc = r.documentData ?? {};
+  const meta = (r.interferenceMetaData as Record<string, unknown>) ?? {};
+  const junior = (r.juniorPartyData as Record<string, unknown>) ?? {};
+  const senior = (r.seniorPartyData as Record<string, unknown>) ?? {};
+  const additional = Array.isArray(r.additionalPartyDataBag) ? (r.additionalPartyDataBag as Record<string, unknown>[]) : [];
+  return {
+    interference_number: pick(r, ['interferenceNumber']) ?? null,
+    style: str(meta.interferenceStyleName) ?? null,
+    declared: str(meta.declarationDate) ?? null,
+    junior_party: formatInterferenceParty(junior),
+    senior_party: formatInterferenceParty(senior),
+    additional_parties: additional.map((p) => ({
+      name: str(p.additionalPartyName) ?? null,
+      inventor: str(p.inventorName) ?? null,
+      application_number: str(p.applicationNumberText) ?? null,
+      patent_number: str(p.patentNumber) ?? null,
+    })),
+    decision_type: str(docRaw.decisionTypeCategory) ?? null,
+    decision_issue_date: str(docRaw.decisionIssueDate) ?? null,
+    outcome: str(docRaw.interferenceOutcomeCategory) ?? null,
+    statutes_and_rules: Array.isArray(docRaw.statuteAndRuleBag) ? (docRaw.statuteAndRuleBag as string[]) : null,
+    document_title: doc.documentTitleText ?? doc.documentName ?? null,
+    document_identifier: doc.documentIdentifier ?? null,
+    document_uri: doc.fileDownloadURI ?? null,
+    case_files_uri: str(meta.fileDownloadURI) ?? null,
+    last_modified: pick(r, ['lastModifiedDateTime']) ?? str(meta.interferenceLastModifiedDate) ?? null,
+  };
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────
@@ -1170,6 +1391,109 @@ const tools: McpToolExport['tools'] = [
         trial_type: { type: 'string', description: 'Optional IPR, PGR, CBM, or DER.' },
         patent_number: { type: 'string' }, party: { type: 'string' },
         limit: { type: 'number', description: '1–100, default 25.' },
+        _apiKey: { type: 'string', description: 'USPTO ODP API key.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'ptab_search_appeals',
+    description:
+      "Search USPTO ex parte Appeals decisions — an applicant's appeal of a patent examiner's rejection to the Patent Trial and Appeal Board. This is a SEPARATE docket from AIA trials (IPR/PGR/CBM/derivation): an appeal number looks like \"2024-001234\", not \"IPR2024-00001\". Returns an outcome-count summary first (affirmed / reversed / affirmed-in-part / other), then the matching decision records, each with the applicant/real-party-in-interest, application and patent number, counsel, art unit, appeal filing date, decision type/date, and the decision document link. Filter by `appeal_number`, `application_number` (the rejected application under appeal), free-text `query`, and/or a `decided_after`/`decided_before` date range. Powered by the USPTO Open Data Portal (data.uspto.gov).",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        appeal_number: {
+          type: 'string',
+          description: 'Optional. Ex parte appeal number, e.g. "2024-001234" (with or without an "Appeal" prefix). This is NOT an AIA trial number.',
+        },
+        application_number: {
+          type: 'string',
+          description: 'Optional. The patent application number under appeal, e.g. "16123456".',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional free-text keyword search across appeal decision records (e.g. a technology term or applicant name).',
+        },
+        decided_after: {
+          type: 'string',
+          description: 'Optional. Only decisions on/after this date (ISO YYYY-MM-DD).',
+        },
+        decided_before: {
+          type: 'string',
+          description: 'Optional. Only decisions on/before this date (ISO YYYY-MM-DD).',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of decision records to return (1-100, default 25). Outcome counts are computed over this same page.',
+        },
+        offset: {
+          type: 'number',
+          description: 'Pagination offset (default 0).',
+        },
+        include_raw: {
+          type: 'boolean',
+          description: 'Optional, default false. When true, also return raw_sample: one UNMODIFIED raw record exactly as the upstream API returned it (no field renaming), to verify or correct this tool\'s field mapping.',
+        },
+        _apiKey: {
+          type: 'string',
+          description: 'USPTO ODP API key (same key as the patents/uspto-ptab packs). Get free at https://data.uspto.gov/apis/getting-started.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'ptab_appeal',
+    description:
+      'Get one USPTO ex parte Appeal decision by its appeal number (e.g. "2024-001234") — the Board\'s decision on an applicant\'s appeal of an examiner rejection. Returns the decision type, issue date, outcome (affirmed / reversed / affirmed-in-part), issues and rules at play, and the decision document title + download link. Powered by the USPTO Open Data Portal (data.uspto.gov).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        appeal_number: {
+          type: 'string',
+          description: 'Ex parte appeal number, e.g. "2024-001234" (with or without an "Appeal" prefix).',
+        },
+        include_raw: {
+          type: 'boolean',
+          description: 'Optional, default false. When true, also return raw_sample: the UNMODIFIED raw record exactly as the upstream API returned it (no field renaming), to verify or correct this tool\'s field mapping.',
+        },
+        _apiKey: { type: 'string', description: 'USPTO ODP API key.' },
+      },
+      required: ['appeal_number'],
+    },
+  },
+  {
+    name: 'ptab_search_interferences',
+    description:
+      "Search USPTO patent Interference decisions — pre-AIA priority contests between competing applicants/patentees over who invented first. A SEPARATE docket from AIA trials and ex parte Appeals. Filter by `patent_number` (a patent or application involved in the contest), `party` (junior- or senior-party name, or either party's real party in interest), and/or free-text `query`. Returns the interference number, style (\"A v. B\"), declaration date, the junior and senior party (each with name, real party in interest, inventor, counsel, application/patent number, grant date), any additional parties, decision type/date and outcome, and the decision document link. Powered by the USPTO Open Data Portal (data.uspto.gov).",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        patent_number: {
+          type: 'string',
+          description: 'Optional. Patent or application number involved in the interference.',
+        },
+        party: {
+          type: 'string',
+          description: 'Optional. Junior- or senior-party name in the priority contest.',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional free-text keyword search across interference decision records.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of results (1-100, default 25).',
+        },
+        offset: {
+          type: 'number',
+          description: 'Pagination offset (default 0).',
+        },
+        include_raw: {
+          type: 'boolean',
+          description: 'Optional, default false. When true, also return raw_sample: one UNMODIFIED raw record exactly as the upstream API returned it (no field renaming), to verify or correct this tool\'s field mapping.',
+        },
         _apiKey: { type: 'string', description: 'USPTO ODP API key.' },
       },
       required: [],
@@ -1392,6 +1716,152 @@ async function recentDecisions(args: Record<string, unknown>) {
   };
 }
 
+// ── Appeals / Interferences implementations ─────────────────────────
+//
+// Deliberately NO hard regex on appeal_number/interference_number — the
+// prior bug here was a hard trial-number regex (`^(IPR|PGR|CBM|DER)\d{4}-
+// \d{5}$`) that rejected a valid ex parte appeal number as malformed because
+// it only recognized AIA trial numbers. These accept any non-empty string
+// (after stripping a leading "Appeal"/"Interference No." label and
+// whitespace) and let the ODP search itself be the source of truth on
+// validity, rather than re-encoding an assumed format client-side.
+
+function normalizeAppealNumber(raw: string): string {
+  return raw.trim().replace(/^appeal\s*/i, '').replace(/^no\.?\s*/i, '').trim();
+}
+
+function normalizeInterferenceNumber(raw: string): string {
+  return raw.trim().replace(/^interference\s*(no\.?)?\s*/i, '').replace(/,/g, '').trim();
+}
+
+// OR several plausible field-name spellings together for one value, so a
+// query still matches whichever field name ODP actually uses (see the
+// unverified-schema note at the top of this file).
+function anyFieldClause(fields: string[], value: string): string {
+  return `(${fields.map((f) => fieldClause(f, value)).join(' OR ')})`;
+}
+
+// At most ONE raw record, completely unmodified — a cheap, bounded way to
+// let a caller (or the next build pass) see the real upstream JSON shape
+// instead of guessing field names again. Off by default; never included
+// unless the caller explicitly asks.
+function rawSample(records: GenericRecord[], includeRaw: unknown): Record<string, unknown> {
+  return includeRaw === true && records.length > 0 ? { raw_sample: records[0] } : {};
+}
+
+async function searchAppeals(args: Record<string, unknown>) {
+  const apiKey = resolveApiKey(args);
+  const limit = clampLimit(args.limit, 25);
+  const offset = clampOffset(args.offset);
+
+  const parts: string[] = [];
+  if (typeof args.appeal_number === 'string' && args.appeal_number.trim()) {
+    parts.push(anyFieldClause(['appealNumber', 'appealDocketNumber'], normalizeAppealNumber(args.appeal_number)));
+  }
+  if (typeof args.application_number === 'string' && args.application_number.trim()) {
+    parts.push(fieldClause('applicationNumberText', args.application_number));
+  }
+  if (typeof args.query === 'string' && args.query.trim()) parts.push(args.query.trim());
+  const after = typeof args.decided_after === 'string' ? args.decided_after.trim() : '';
+  const before = typeof args.decided_before === 'string' ? args.decided_before.trim() : '';
+  if (after || before) {
+    parts.push(`decisionData.decisionIssueDate:[${after || '*'} TO ${before || '*'}]`);
+  }
+  if (parts.length === 0) {
+    throw new Error('Pass at least one of: appeal_number, application_number, query, decided_after/decided_before.');
+  }
+  const q = joinAnd(parts);
+
+  const raw = await ptabSearch(apiKey, '/decisions/search', 'ptab_search_appeals', q, offset, limit, APPEALS_BASE_URL);
+  const data = raw as unknown as GenericSearchResponse;
+  const records = unwrapLoud(data, ['patentAppealDataBag', 'patentAppealDecisionDataBag', 'appealDecisionDataBag'], 'ptab_search_appeals');
+  return {
+    query: q,
+    // Outcome counts FIRST, records last (per the gap this tool closes).
+    by_outcome: tally(records.map((r) => r.decisionData?.appealOutcomeCategory)),
+    ...resultCoverage(data, records),
+    appeals: records.map(formatAppeal),
+    ...rawSample(records, args.include_raw),
+    scope_note: 'Ex parte Appeals decisions are a separate USPTO docket from AIA trials (IPR/PGR/CBM/derivation) and from Interferences. Outcome labels require review in proceeding context.',
+  };
+}
+
+async function getAppeal(args: Record<string, unknown>) {
+  const apiKey = resolveApiKey(args);
+  const appealNumber = normalizeAppealNumber(requiredText(args, 'appeal_number'));
+  const q = anyFieldClause(['appealNumber', 'appealDocketNumber'], appealNumber);
+  const raw = await ptabSearch(apiKey, '/decisions/search', 'ptab_appeal', q, 0, 5, APPEALS_BASE_URL);
+  const data = raw as unknown as GenericSearchResponse;
+  const records = unwrapLoud(data, ['patentAppealDataBag', 'patentAppealDecisionDataBag', 'appealDecisionDataBag'], 'ptab_appeal');
+  if (records.length === 0) {
+    return {
+      found: false,
+      appeal_number: appealNumber,
+      message: 'No public ex parte Appeal decision matched this appeal number.',
+    };
+  }
+  return {
+    found: true,
+    appeal_number: appealNumber,
+    matches: records.length,
+    decision: formatAppeal(records[0]),
+    other_matches: records.slice(1).map(formatAppeal),
+    ...rawSample(records, args.include_raw),
+    scope_note: 'From the USPTO ex parte Appeals docket — an applicant\'s appeal of an examiner rejection, not an AIA trial (IPR/PGR/CBM/derivation) or Interference.',
+  };
+}
+
+async function searchInterferences(args: Record<string, unknown>) {
+  const apiKey = resolveApiKey(args);
+  const limit = clampLimit(args.limit, 25);
+  const offset = clampOffset(args.offset);
+
+  // Field names confirmed live via include_raw (fleet #3306 follow-up,
+  // 2026-10-18) — junior/senior party and patent/application number live
+  // under juniorPartyData/seniorPartyData, not flat juniorPartyName etc.
+  const parts: string[] = [];
+  if (typeof args.patent_number === 'string' && args.patent_number.trim()) {
+    const v = args.patent_number.trim();
+    parts.push(
+      anyFieldClause(
+        ['juniorPartyData.patentNumber', 'seniorPartyData.patentNumber', 'juniorPartyData.applicationNumberText', 'seniorPartyData.applicationNumberText'],
+        v,
+      ),
+    );
+  }
+  if (typeof args.party === 'string' && args.party.trim()) {
+    const p = args.party.trim();
+    parts.push(
+      `(${anyFieldClause(
+        [
+          'juniorPartyData.patentOwnerName',
+          'seniorPartyData.patentOwnerName',
+          'juniorPartyData.realPartyInInterestName',
+          'seniorPartyData.realPartyInInterestName',
+          'interferenceMetaData.interferenceStyleName',
+        ],
+        p,
+      )} OR ${esc(p)})`,
+    );
+  }
+  if (typeof args.query === 'string' && args.query.trim()) parts.push(args.query.trim());
+  if (parts.length === 0) {
+    throw new Error('Pass at least one of: patent_number, party, query.');
+  }
+  const q = joinAnd(parts);
+
+  const raw = await ptabSearch(apiKey, '/decisions/search', 'ptab_search_interferences', q, offset, limit, INTERFERENCES_BASE_URL);
+  const data = raw as unknown as GenericSearchResponse;
+  const records = unwrapLoud(data, ['patentInterferenceDataBag', 'interferenceDecisionDataBag'], 'ptab_search_interferences');
+  return {
+    query: q,
+    ...resultCoverage(data, records),
+    interferences: records.map(formatInterference),
+    ...rawSample(records, args.include_raw),
+    scope_note: 'Interferences are pre-AIA priority contests, a separate USPTO docket from AIA trials and ex parte Appeals. Junior/senior party labels follow USPTO\'s priority-contest convention (not seniority of counsel); verify party identity against the decision document.',
+  };
+}
+
 // ── callTool router ──────────────────────────────────────────────────
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -1410,6 +1880,12 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return partyExposure(args);
     case 'ptab_recent_decisions':
       return recentDecisions(args);
+    case 'ptab_search_appeals':
+      return searchAppeals(args);
+    case 'ptab_appeal':
+      return getAppeal(args);
+    case 'ptab_search_interferences':
+      return searchInterferences(args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
