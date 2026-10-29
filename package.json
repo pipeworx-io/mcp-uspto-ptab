@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-uspto-ptab",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "USPTO PTAB MCP — wraps the USPTO Open Data Portal (ODP) PTAB APIs",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-uspto-ptab": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "uspto-ptab"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-uspto-ptab.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/uspto-ptab",
   "pipeworx": {
-    "sourceHash": "v1-298661f8fc7951c586a5862771256278be76e3f8135c4dbc2d5cf7a4d7b735f9",
-    "sourceCommit": "0f33463aa47677f38e4f177a4b4a7160dd80819f"
+    "mode": "gateway",
+    "slug": "uspto-ptab",
+    "gatewaySlug": "uspto-ptab",
+    "sourceHash": "v1-5e5cbfc76d0720317b7e83842ddddc340321821be6260829c7ea3bec68a47540",
+    "sourceCommit": "98853f34516646cb7c4c1460f09249b262c0269e"
   }
 }
