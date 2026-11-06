@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-uspto-ptab",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "USPTO PTAB MCP — wraps the USPTO Open Data Portal (ODP) PTAB APIs",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "mode": "gateway",
     "slug": "uspto-ptab",
     "gatewaySlug": "uspto-ptab",
-    "sourceHash": "v1-5e5cbfc76d0720317b7e83842ddddc340321821be6260829c7ea3bec68a47540",
-    "sourceCommit": "98853f34516646cb7c4c1460f09249b262c0269e"
+    "sourceHash": "v1-04a999f813492aebdc2ca9c8e239354fceda004a8dff54d1c8e34a6393244459",
+    "sourceCommit": "ca52e7ed1e1ccad897c2da1b0fa105edc0bc3b2e"
   }
 }
